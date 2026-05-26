@@ -3,11 +3,6 @@
  * Uso: node scripts/seed-airports.mjs
  */
 import { createClient } from '@supabase/supabase-js'
-import { readFileSync, existsSync } from 'fs'
-import { join, dirname } from 'path'
-import { fileURLToPath } from 'url'
-
-const __dirname = dirname(fileURLToPath(import.meta.url))
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -19,19 +14,40 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
 
+function parseCSVLine(line) {
+  const fields = []
+  let field = ''
+  let inQuote = false
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    if (inQuote) {
+      if (c === '"' && line[i + 1] === '"') { field += '"'; i++ }
+      else if (c === '"') inQuote = false
+      else field += c
+    } else if (c === '"') {
+      inQuote = true
+    } else if (c === ',') {
+      fields.push(field); field = ''
+    } else {
+      field += c
+    }
+  }
+  fields.push(field)
+  return fields
+}
+
 // OpenFlights: https://raw.githubusercontent.com/jpatokal/openflights/master/data/airports.dat
 // Colunas: id, name, city, country, iata, icao, lat, lon, alt, tz, dst, tz_db, type, source
 async function fetchOpenFlights() {
-  console.log('📥 Baixando dados do OpenFlights...')
+  console.log('📥 Baixando dados do OpenFlights (~7500 aeroportos)...')
   const res = await fetch('https://raw.githubusercontent.com/jpatokal/openflights/master/data/airports.dat')
   const text = await res.text()
   const airports = []
 
   for (const line of text.split('\n')) {
     if (!line.trim()) continue
-    // CSV com aspas
-    const fields = line.match(/("(?:[^"]|"")*"|[^,]*)/g)?.map((f) => f.replace(/^"|"$/g, '').replace(/""/g, '"'))
-    if (!fields || fields.length < 8) continue
+    const fields = parseCSVLine(line.trim())
+    if (fields.length < 8) continue
 
     const iata = fields[4]?.trim()
     const icao = fields[5]?.trim()
@@ -46,7 +62,7 @@ async function fetchOpenFlights() {
 
     airports.push({
       iata_code: iata,
-      icao_code: icao === '\\N' ? null : icao,
+      icao_code: (!icao || icao === '\\N') ? null : icao,
       name,
       city: city || null,
       country: country || null,
@@ -62,34 +78,41 @@ async function fetchOpenFlights() {
 
 // aeroportos-br: JSON com aeroportos brasileiros mais detalhados
 async function fetchBrazilAirports() {
-  console.log('📥 Baixando aeroportos brasileiros...')
-  try {
-    const res = await fetch('https://raw.githubusercontent.com/ArthurPavezzi-zz/aeroportos-br/master/aeroportos.json')
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json()
-    const airports = []
+  console.log('📥 Buscando aeroportos brasileiros extras...')
+  const URLS = [
+    'https://raw.githubusercontent.com/ArthurPavezzi-zz/aeroportos-br/main/aeroportos.json',
+    'https://raw.githubusercontent.com/ArthurPavezzi-zz/aeroportos-br/master/aeroportos.json',
+  ]
 
-    for (const apt of data) {
-      const iata = apt.iata?.trim()
-      if (!iata || iata.length !== 3) continue
-      airports.push({
-        iata_code: iata,
-        icao_code: apt.icao?.trim() || null,
-        name: apt.nome || apt.name || iata,
-        city: apt.cidade || apt.city || null,
-        country: 'Brazil',
-        latitude: apt.latitude ? parseFloat(apt.latitude) : null,
-        longitude: apt.longitude ? parseFloat(apt.longitude) : null,
-        is_brazil: true,
-      })
+  for (const url of URLS) {
+    try {
+      const res = await fetch(url)
+      if (!res.ok) continue
+      const data = await res.json()
+      const airports = []
+      for (const apt of data) {
+        const iata = apt.iata?.trim()
+        if (!iata || iata.length !== 3) continue
+        airports.push({
+          iata_code: iata,
+          icao_code: apt.icao?.trim() || null,
+          name: apt.nome || apt.name || iata,
+          city: apt.cidade || apt.city || null,
+          country: 'Brazil',
+          latitude: apt.latitude ? parseFloat(apt.latitude) : null,
+          longitude: apt.longitude ? parseFloat(apt.longitude) : null,
+          is_brazil: true,
+        })
+      }
+      console.log(`✅ aeroportos-br: ${airports.length} aeroportos brasileiros`)
+      return airports
+    } catch {
+      continue
     }
-
-    console.log(`✅ aeroportos-br: ${airports.length} aeroportos brasileiros`)
-    return airports
-  } catch (err) {
-    console.warn('⚠️  Falha ao carregar aeroportos-br:', err.message)
-    return []
   }
+
+  console.warn('⚠️  aeroportos-br indisponível — usando apenas OpenFlights para o Brasil')
+  return []
 }
 
 async function main() {
@@ -98,11 +121,12 @@ async function main() {
   // Mescla: aeroportos-br tem precedência para registros brasileiros
   const byIata = new Map()
   for (const apt of openFlights) byIata.set(apt.iata_code, apt)
-  for (const apt of brazilExtra) byIata.set(apt.iata_code, apt) // sobrescreve BR
+  for (const apt of brazilExtra) byIata.set(apt.iata_code, apt)
 
   const all = [...byIata.values()]
+  const brazilCount = all.filter((a) => a.is_brazil).length
   console.log(`\n📊 Total de aeroportos únicos: ${all.length}`)
-  console.log(`🇧🇷 Aeroportos brasileiros: ${all.filter((a) => a.is_brazil).length}`)
+  console.log(`🇧🇷 Aeroportos brasileiros: ${brazilCount}`)
 
   // Insere em lotes de 500
   const BATCH = 500
@@ -114,14 +138,15 @@ async function main() {
       .upsert(batch, { onConflict: 'iata_code' })
 
     if (error) {
-      console.error(`❌ Erro no lote ${i / BATCH + 1}:`, error.message)
+      console.error(`\n❌ Erro no lote ${Math.floor(i / BATCH) + 1}:`, error.message)
     } else {
       inserted += batch.length
       process.stdout.write(`\r📤 Inseridos: ${inserted}/${all.length}`)
     }
   }
 
-  console.log(`\n✅ Seed concluído! ${inserted} aeroportos no banco.`)
+  console.log(`\n\n✅ Seed concluído! ${inserted} aeroportos no banco.`)
+  console.log(`\nVerifique no Studio: http://127.0.0.1:54323`)
 }
 
 main().catch((err) => {

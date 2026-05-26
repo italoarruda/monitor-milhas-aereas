@@ -1,3 +1,6 @@
+-- Extensão de busca textual (deve vir antes dos índices gin_trgm)
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 CREATE TABLE IF NOT EXISTS airports (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   iata_code   VARCHAR(3) UNIQUE,
@@ -14,6 +17,3 @@ CREATE TABLE IF NOT EXISTS airports (
 CREATE INDEX IF NOT EXISTS idx_airports_iata ON airports (iata_code);
 CREATE INDEX IF NOT EXISTS idx_airports_city ON airports USING gin (city gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_airports_brazil ON airports (is_brazil);
-
--- Extensão de busca textual
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
